@@ -1,0 +1,398 @@
+---
+title: ''
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data processing
+```{r, warning=FALSE}
+dat = read.csv("breast-cancer.csv", header=TRUE)
+dat = dat[,-1]
+dat$diagnosis = factor(dat$diagnosis)
+
+x = model.matrix(diagnosis ~ ., dat)[,-1]
+y = dat$diagnosis
+```
+
+## KNN
+```{r, warning=FALSE}
+library(pROC)
+library(dplyr)
+library(class)
+set.seed(777) #2.8% error @ 250 size obs, #3.
+train <- sample(569, 400)
+
+#pairs(data[,3:12], col=data$diagnosis, pch=3)
+
+## Standardize data to mean 0, var 1 using dplyr library
+
+standardized.data <- dat[,2:31] %>% mutate_all(~(scale(.) %>% as.vector))
+
+standardized.data$isMalignant <- as.numeric(dat$diagnosis) - 1
+standardized.data$diagnosis <- dat$diagnosis
+
+train.data <- standardized.data[train,]
+test.data <- standardized.data[-train,]
+
+X.train <- cbind(train.data[1:30])
+X.test <- cbind(test.data[1:30])
+train.diag <- as.numeric(train.data$diagnosis) - 1
+test.diag <- as.numeric(test.data$diagnosis) - 1
+
+testerror <- rep(NA,50)
+tables <- rep(NA, 50)
+
+for(j in 1:50){
+  knn.pred <- knn(X.train, X.test, train.diag, k=j)
+  table(knn.pred,test.diag)
+  testerror[j] <- mean(knn.pred!=test.diag)
+}
+
+testerror
+which.min(testerror)
+
+
+fivefoldcv <- matrix(NA, 5,50)
+randomseq <- c(1:569)[order(runif(569))]
+fold <- rep(1:5, 569/5)
+FNR.matrix <- matrix(NA, 5,50)
+for(i in 1:5){
+  train=randomseq[fold!=i]
+  train.data <- standardized.data[train,]
+  test.data <- standardized.data[-train,]
+  
+  train.X <- cbind(train.data[1:30])
+  test.X <- cbind(test.data[1:30])
+  train.diag <- as.numeric(train.data$isMalignant)
+  test.diag <- as.numeric(test.data$isMalignant)
+
+  for(j in 1:50) {
+    knn.pred <- knn(train.X, test.X, train.diag, k=j)
+    fivefoldcv[i, j] <- mean(knn.pred!=test.diag)
+    FNR.matrix[i, j] <- sum(knn.pred==0 & test.diag==1)/sum(test.diag==0)
+  }
+}
+fivefold <- apply(fivefoldcv, MARGIN=2, FUN=mean)
+ffFNR <- apply(FNR.matrix, MARGIN=2, FUN=mean)
+plot(1:50, fivefold, type='b', main="Five fold cross-validation KNN", xlab="# of neighbours", ylab="5 fold CV", col=2, ylim=c(0,0.08))
+plot(1:50, ffFNR, type='b', main="Five fold cross-validation KNN FNR", xlab="# of neighbours", ylab="5 fold CV", col=2, ylim=c(0,0.09))
+
+# Results at k=4 for five fold cv
+sens.knn <- rep(NA, 5)
+spec.knn <- rep(NA, 5)
+auc.knn <- rep(NA, 5)
+for(i in 1:5){
+  train=randomseq[fold!=i]
+  train.data <- standardized.data[train,]
+  test.data <- standardized.data[-train,]
+  
+  train.X <- cbind(train.data[1:30])
+  test.X <- cbind(test.data[1:30])
+  train.diag <- as.numeric(train.data$isMalignant)
+  test.diag <- as.numeric(test.data$isMalignant)
+  knn.pred <- knn(train.X, test.X, train.diag, k=4, prob=TRUE)
+  knn.pred.prob <- ifelse(as.numeric(knn.pred) - 1, attributes(knn.pred)$prob, 
+                          1 - attributes(knn.pred)$prob)
+  knn.pred.class <- ifelse(knn.pred.prob >= 0.5, 1, 0)
+  
+  ## confusion matrix
+  conf.matrix <- table(knn.pred.class, test.diag)
+  #conf.matrix
+  
+  ## Sensitivity
+  sens.knn[i] <- conf.matrix[4] / (conf.matrix[3]+conf.matrix[4])
+  
+  ## Specificity
+  spec.knn[i] <- conf.matrix[1] / (conf.matrix[1]+conf.matrix[2])
+   
+  ## Area under curve
+  auc.knn[i] <- roc(test.diag~knn.pred.prob, levels=c(0,1), direction="<")$auc
+}
+
+# average sensitivity across 5 folds
+mean(sens.knn)
+
+# average specificity across 5 folds
+mean(spec.knn)
+
+# average AUC across 5 folds
+mean(auc.knn)
+```
+
+
+## Logistic Regression
+```{r, warning=FALSE}
+set.seed(777)
+# Since logisitc regression is parametric, there is no need to standardize data
+# (unlike with KNN)
+
+# First, let's see if there is seperation between features for each class, to
+# See if logistic regression is a viable option. (particularly, we can see if
+# the linear boundary decision from logistic regression may be problematic)
+pairs(dat[,2:11], col=dat$diagnosis, pch=3)
+pairs(dat[,12:21], col=dat$diagnosis, pch=3)
+pairs(dat[,22:31], col=dat$diagnosis, pch=3)
+
+# from the pairs graphs, we can see some good seperation in most graphs, but not
+# all. Let's eliminate the coefficients which have the lowest correlation with
+# our binary outcome.
+
+dat$isMalignant <- as.numeric(dat$diagnosis) - 1
+
+# Create correlation matrix between all variables
+cor.matrix <- cor(dat[,2:32])
+
+# We just want to ensure correlation with malignancy binary variable, so just
+# grab that column (or the row, doesn't matter since this is symm matrix)
+
+cor.mal <- abs(cor.matrix["isMalignant",])
+
+# Let us use a naive measure to remove variables:
+# now if the abs. correlation value isn't greater than some threshold, we
+# consider the variable "irrelevant". (threshold = 0.3 for this example)
+
+irrelevantvars <- cor.mal[cor.mal<=0.5]
+relevantvars <- cor.mal[cor.mal > 0.5]
+
+irrelevantvars
+
+rel.data <- dat[names(relevantvars)]
+
+# We'll use a 70-30 split for training and testing data
+train <- sample(569, 400)
+train.data <- rel.data[train,]
+test.data <- rel.data[-train,]
+
+logitreg <- glm(isMalignant~., family=binomial(link ="logit"), data= train.data)
+pred.linear <- predict(logitreg, newdata=test.data)
+pred.prob <- exp(pred.linear)/(1+exp(pred.linear))
+pred.class <- ifelse(pred.prob>0.5, 1, 0)
+conf.matrix <- table(pred.class, true.class=test.data$isMalignant)
+mean(pred.class!=test.data$isMalignant)
+Sensitivity <- conf.matrix[4] / (conf.matrix[3]+conf.matrix[4])
+Specificity <- conf.matrix[1] / (conf.matrix[1]+conf.matrix[2])
+Sensitivity
+Specificity
+roc(test.data$isMalignant~pred.prob, levels=c(0,1), direction="<")$auc
+
+## 5-fold cv
+sens.log <- rep(NA, 5)
+spec.log <- rep(NA, 5)
+auc.log <- rep(NA, 5)
+for(i in 1:5){
+  train=randomseq[fold!=i]
+  train.data <- rel.data[train,]
+  test.data <- rel.data[-train,]
+  logitreg <- glm(isMalignant~., family=binomial(link ="logit"), data=train.data)
+  
+  pred.linear <- predict(logitreg, newdata=test.data)
+  pred.prob <- exp(pred.linear)/(1+exp(pred.linear))
+  pred.class <- ifelse(pred.prob>=0.5, 1, 0)
+  
+  ## confusion matrix
+  conf.matrix <- table(pred.class, true.class=test.data$isMalignant)
+  #conf.matrix
+  
+  ## Sensitivity
+  sens.log[i] <- conf.matrix[4] / (conf.matrix[3]+conf.matrix[4])
+  
+  ## Specificity
+  spec.log[i] <- conf.matrix[1] / (conf.matrix[1]+conf.matrix[2])
+   
+  ## Area under curve
+  auc.log[i] <- roc(test.data$isMalignant~pred.prob, levels=c(0,1), direction="<")$auc
+}
+
+# average sensitivity across 5 folds
+mean(sens.log)
+
+# average specificity across 5 folds
+mean(spec.log)
+
+# average AUC
+mean(auc.log)
+```
+
+## Ridge
+```{r, warning=FALSE}
+library(glmnet)
+set.seed(777)
+
+grid = 10^seq(-2, 10, length = 100)
+
+sens.ridge <- rep(NA, 5)
+spec.ridge <- rep(NA, 5)
+auc.ridge <- rep(NA, 5)
+for(i in 1:5){
+  train=randomseq[fold!=i]
+  ridge.mod = cv.glmnet(x[train,], y[train], alpha = 0, lambda = grid,
+                        family = binomial)
+  
+  coef(ridge.mod, s = "lambda.1se")
+  
+  ridge.pred <- predict(ridge.mod, s="lambda.1se", newx=x[-train,],
+                        type="response")
+  ridge.pred.class <- ifelse(ridge.pred >= 0.5, "M", "B")
+  y.test = y[-train]
+  
+  ## confusion matrix
+  conf.matrix <- table(ridge.pred.class, y.test)
+  #conf.matrix
+  
+  ## Sensitivity
+  sens.ridge[i] <- conf.matrix[4] / (conf.matrix[3]+conf.matrix[4])
+  
+  ## Specificity
+  spec.ridge[i] <- conf.matrix[1] / (conf.matrix[1]+conf.matrix[2])
+   
+  ## Area under curve
+  auc.ridge[i] <- roc(y.test~ridge.pred, levels=c("B","M"), direction="<")$auc
+}
+
+# average sensitivity across 5 folds
+mean(sens.ridge)
+
+# average specificity across 5 folds
+mean(spec.ridge)
+
+# average AUC
+mean(auc.ridge)
+
+# test for optimizing sensitivity
+set.seed(777)
+
+sens.ridge <- rep(NA, 5)
+spec.ridge <- rep(NA, 5)
+auc.ridge <- rep(NA, 5)
+for(i in 1:5){
+  train=randomseq[fold!=i]
+  ridge.mod = cv.glmnet(x[train,], y[train], alpha = 0, lambda = grid,
+                        family = binomial)
+  
+  coef(ridge.mod, s = "lambda.1se")
+  
+  ridge.pred <- predict(ridge.mod, s="lambda.1se", newx=x[-train,],
+                        type="response")
+  ridge.pred.class <- ifelse(ridge.pred >= 0.14, "M", "B")
+  y.test = y[-train]
+  
+  ## confusion matrix
+  conf.matrix <- table(ridge.pred.class, y.test)
+  #conf.matrix
+  
+  ## Sensitivity
+  sens.ridge[i] <- conf.matrix[4] / (conf.matrix[3]+conf.matrix[4])
+  
+  ## Specificity
+  spec.ridge[i] <- conf.matrix[1] / (conf.matrix[1]+conf.matrix[2])
+   
+  ## Area under curve
+  auc.ridge[i] <- roc(y.test~ridge.pred, levels=c("B","M"), direction="<")$auc
+}
+
+# average sensitivity across 5 folds
+mean(sens.ridge)
+
+# average specificity across 5 folds
+mean(spec.ridge)
+
+# average AUC
+mean(auc.ridge)
+```
+
+## Lasso logistic
+```{r, warning=FALSE}
+set.seed(777)
+
+sens.lasso <- rep(NA, 5)
+spec.lasso <- rep(NA, 5)
+auc.lasso <- rep(NA, 5)
+for(i in 1:5){
+  train=randomseq[fold!=i]
+  lasso.mod = cv.glmnet(x[train,], y[train], alpha = 1, lambda = grid, 
+                        family = binomial)
+  
+  lasso.pred <- predict(lasso.mod, s="lambda.1se", newx=x[-train,], 
+                        type="response")
+  lasso.pred.class <- ifelse(lasso.pred >= 0.5, "M", "B")
+  y.test = y[-train]
+  
+  ## confusion matrix
+  conf.matrix.lasso <- table(lasso.pred.class, y.test)
+  #conf.matrix.lasso
+  
+  ## Sensitivity
+  sens.lasso[i] <- conf.matrix.lasso[4] / (conf.matrix.lasso[3]+conf.matrix.lasso[4])
+  
+  ## Specificity
+  spec.lasso[i] <- conf.matrix.lasso[1] / (conf.matrix.lasso[1]+conf.matrix.lasso[2])
+  
+  ## Area under curve
+  auc.lasso[i] <- roc(y.test~lasso.pred, levels=c("B","M"), direction="<")$auc
+}
+
+# average sensitivity across 5 folds
+mean(sens.lasso)
+
+# average specificity across 5 folds
+mean(spec.lasso)
+
+# average AUC
+mean(auc.lasso)
+```
+
+## Elastic Net
+```{r, warning=FALSE}
+set.seed(777)
+
+sens.elastic <- rep(NA, 5)
+spec.elastic <- rep(NA, 5)
+auc.elastic <- rep(NA, 5)
+for(i in 1:5){
+  train=randomseq[fold!=i]
+  elastic.mod = cv.glmnet(x[train,], y[train], alpha = 0.5, lambda = grid, 
+                          family = binomial)
+  
+  #coef(elastic.mod, s = "lambda.1se")
+  
+  elastic.pred <- predict(elastic.mod, s="lambda.1se", newx=x[-train,], 
+                          type="response")
+  elastic.pred.class <- ifelse(elastic.pred >= 0.5, "M", "B")
+  y.test = y[-train]
+  
+  ## confusion matrix
+  conf.matrix.elastic <- table(elastic.pred.class, y.test)
+  
+  ## Sensitivity
+  sens.elastic[i] <- conf.matrix.elastic[4] / (conf.matrix.elastic[3]+conf.matrix.elastic[4])
+  
+  ## Specificity
+  spec.elastic[i] <- conf.matrix.elastic[1] / (conf.matrix.elastic[1]+conf.matrix.elastic[2])
+  
+  ## Area under curve
+  auc.elastic[i] <- roc(y.test~elastic.pred, levels=c("B","M"), direction="<")$auc
+}
+
+# average sensitivity across 5 folds
+mean(sens.elastic)
+
+# average specificity across 5 folds
+mean(spec.elastic)
+
+# average AUC across 5 folds
+mean(auc.elastic)
+```
+
+## Final Ridge model specifications
+```{r, warning=FALSE}
+final.ridge.mod = cv.glmnet(x, y, alpha = 0, lambda = grid,
+                        family = binomial)
+  
+coef(final.ridge.mod, s = "lambda.1se")
+```
